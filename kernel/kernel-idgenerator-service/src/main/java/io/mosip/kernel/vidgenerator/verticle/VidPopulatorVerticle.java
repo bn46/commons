@@ -63,7 +63,7 @@ public class VidPopulatorVerticle extends AbstractVerticle {
 	 */
 	
 	@Override
-	public void start(Future<Void> startFuture) {
+	public void start(io.vertx.core.Future<Void> startFuture) {
 		vertx.eventBus().consumer(EventType.GENERATEPOOL, handler -> {
 			long noOfFreeVids = Long.parseLong(handler.body().toString());
 			long noOfVidsToGenerate = vidToGenerate - noOfFreeVids;
@@ -71,16 +71,19 @@ public class VidPopulatorVerticle extends AbstractVerticle {
 
 			int threads = 4;
 			int batchSize = 500;
-			int perThreadTarget = (int) (noOfVidsToGenerate / threads);
+			long perThreadTarget = noOfVidsToGenerate / threads;
+			long remaining = noOfVidsToGenerate % threads;
+
 			Set<String> generatedSet = ConcurrentHashMap.newKeySet();
 			ExecutorService executor = Executors.newFixedThreadPool(threads);
 			List<Callable<Integer>> tasks = new ArrayList<>();
 
 			for (int t = 0; t < threads; t++) {
+				long finalTarget = perThreadTarget + (t == threads - 1 ? remaining : 0); // last thread gets the remainder
 				tasks.add(() -> {
 					int inserted = 0;
 					List<VidEntity> batch = new ArrayList<>();
-					while (inserted < perThreadTarget) {
+					while (inserted < finalTarget) {
 						String vid = vidGenerator.generateId();
 						if (generatedSet.add(vid)) {
 							VidEntity entity = new VidEntity();
@@ -94,7 +97,6 @@ public class VidPopulatorVerticle extends AbstractVerticle {
 							batch.clear();
 						}
 					}
-					// Insert remaining
 					if (!batch.isEmpty()) {
 						inserted += vidWriter.persistVidsInBulk(batch);
 					}
@@ -102,20 +104,31 @@ public class VidPopulatorVerticle extends AbstractVerticle {
 				});
 			}
 
-			try {
-				int totalInserted = 0;
-				List<Future<Integer>> results = executor.invokeAll(tasks);
-				for (Future<Integer> result : results) {
-					totalInserted += result.get();
+			vertx.executeBlocking(promise -> {
+				try {
+					int totalInserted = 0;
+					List<java.util.concurrent.Future<Integer>> results = executor.invokeAll(tasks);
+					for (java.util.concurrent.Future<Integer> result : results) {
+						totalInserted += result.get();
+					}
+					LOGGER.info("✅ Total VIDs persisted: {}", totalInserted);
+					promise.complete(totalInserted);
+				} catch (Exception e) {
+					LOGGER.error("❌ Error during VID pool generation", e);
+					promise.fail(e);
+				} finally {
+					executor.shutdown();
 				}
-				handler.reply("pool population successful");
-				LOGGER.info("✅ Total VIDs persisted: {}", totalInserted);
-			} catch (Exception e) {
-				LOGGER.error("❌ Error during VID pool generation", e);
-				handler.fail(500, "VID generation failed");
-			} finally {
-				executor.shutdown();
-			}
+			}, res -> {
+				if (res.succeeded()) {
+					handler.reply("pool population successful");
+				} else {
+					handler.fail(500, "VID generation failed");
+				}
+			});
 		});
+
+		startFuture.complete(); // ✅ mark verticle startup as successful
 	}
+
 }

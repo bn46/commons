@@ -3,6 +3,8 @@ package io.mosip.kernel.uingenerator.generator;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceException;
 
+import java.util.List;
+
 import org.hibernate.Session;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -77,6 +79,27 @@ public class UinWriter {
 		return session;
 	}
 
+	public void saveBatch(List<UinEntity> uinBatch) {
+		Session session = getSession();
+		try {
+			session.beginTransaction();
+			int batchSize = 50; // Can be tuned
+			for (int i = 0; i < uinBatch.size(); i++) {
+				session.save(uinBatch.get(i));
+				if (i % batchSize == 0 && i > 0) {
+					session.flush();
+					session.clear();
+				}
+			}
+			session.getTransaction().commit();
+		} catch (Exception e) {
+			session.getTransaction().rollback();
+			throw e; // rethrow so upstream handles it
+		} finally {
+			session.clear();
+		}
+	}
+	
 	public void closeSession() {
 		if (session != null) {
 			session.clear();

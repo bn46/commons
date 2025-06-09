@@ -10,6 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -162,7 +163,7 @@ public class UinGeneratorImpl implements UinGenerator {
 
 		int threads = 4;
 		int batchSize = 500;
-		int totalBatches = (int) (noOfUINToGenerate / (threads * batchSize));
+		AtomicLong globalCounter = new AtomicLong(0);
 		Set<String> globalGeneratedSet = ConcurrentHashMap.newKeySet();
 
 		ExecutorService executor = Executors.newFixedThreadPool(threads);
@@ -171,22 +172,19 @@ public class UinGeneratorImpl implements UinGenerator {
 		for (int i = 0; i < threads; i++) {
 			tasks.add(() -> {
 				try {
-					for (int b = 0; b < totalBatches; b++) {
+					while (globalCounter.get() < noOfUINToGenerate) {
 						List<UinEntity> batch = new ArrayList<>(batchSize);
-						while (batch.size() < batchSize) {
+						while (batch.size() < batchSize && globalCounter.get() < noOfUINToGenerate) {
 							String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
 							if (globalGeneratedSet.add(uin) && uinFilterUtils.isValidId(uin) && !uinService.uinExist(uin)) {
 								UinEntity uinBean = new UinEntity(uin, uinDefaultStatus);
 								metaDataUtil.setCreateMetaData(uinBean);
 								batch.add(uinBean);
+								globalCounter.incrementAndGet();
 							}
 						}
-						// Perform batch insert
-						uinWriter.setSession();
-						for (UinEntity entity : batch) {
-							uinWriter.persistUin(entity);
-						}
-						uinWriter.closeSession();
+						// ⏩ Bulk insert
+						uinWriter.saveBatch(batch);
 					}
 				} catch (Exception e) {
 					LOGGER.error("❌ UIN generation thread failed", e);
@@ -206,6 +204,7 @@ public class UinGeneratorImpl implements UinGenerator {
 
 		LOGGER.info("✅ Generated total of {} UINs", noOfUINToGenerate);
 	}
+
 	
 	/**
 	 * Generates a id and then generate checksum
