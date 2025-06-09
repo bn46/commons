@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.stream.Stream;
 
 import org.apache.commons.io.IOUtils;
@@ -20,6 +21,7 @@ import io.mosip.kernel.core.templatemanager.spi.TemplateManager;
 import io.mosip.kernel.core.util.FileUtils;
 import io.mosip.kernel.idgenerator.config.ConfigUrlsBuilder;
 import io.mosip.kernel.idgenerator.config.HibernateDaoConfig;
+import io.mosip.kernel.idgenerator.verticle.HttpServerVerticle;
 import io.mosip.kernel.templatemanager.velocity.builder.TemplateManagerBuilderImpl;
 import io.mosip.kernel.uingenerator.constant.UinGeneratorConstant;
 import io.mosip.kernel.uingenerator.verticle.UinGeneratorVerticle;
@@ -99,7 +101,15 @@ public class IDGeneratorVertxApplication {
 	public static void main(String[] args) {
 		System.setProperty("vertx.logger-delegate-factory-class-name", SLF4JLogDelegateFactory.class.getName());
 		LOGGER = LoggerFactory.getLogger(IDGeneratorVertxApplication.class);
-		loadPropertiesFromConfigServer();
+
+		CountDownLatch latch = new CountDownLatch(1);
+		loadPropertiesFromConfigServer(latch);
+
+		try {
+			latch.await(); // Wait until config is fetched and application starts
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+		}
 	}
 
 	/**
@@ -108,43 +118,44 @@ public class IDGeneratorVertxApplication {
 	 * present are over-ridden. If retrievation fails, the local properties are used
 	 * for running the application.
 	 */
-	private static void loadPropertiesFromConfigServer() {
+	private static void loadPropertiesFromConfigServer(CountDownLatch latch) {
 		Vertx vertx = Vertx.vertx();
 		try {
 			List<ConfigStoreOptions> configStores = new ArrayList<>();
 			List<String> configUrls = ConfigUrlsBuilder.getURLs();
-			configUrls.forEach(url -> configStores
-					.add(new ConfigStoreOptions().setType(VIDGeneratorConstant.CONFIG_STORE_OPTIONS_TYPE)
-							.setConfig(new JsonObject().put(VIDGeneratorConstant.URL, url).put(
-									VIDGeneratorConstant.TIME_OUT,
-									Long.parseLong(VIDGeneratorConstant.CONFIG_SERVER_FETCH_TIME_OUT)))));
-			ConfigRetrieverOptions configRetrieverOptions = new ConfigRetrieverOptions();
-			configStores.forEach(configRetrieverOptions::addStore);
-			ConfigRetriever retriever = ConfigRetriever.create(vertx, configRetrieverOptions.setScanPeriod(0));
-			LOGGER.info("Retrieving configuration from Spring-Config-Server");
-			retriever.getConfig(json -> {
-				if (json.succeeded()) {
-					JsonObject jsonObject = json.result();
+			configUrls.forEach(url -> configStores.add(new ConfigStoreOptions()
+				.setType(VIDGeneratorConstant.CONFIG_STORE_OPTIONS_TYPE)
+				.setConfig(new JsonObject()
+					.put(VIDGeneratorConstant.URL, url)
+					.put(VIDGeneratorConstant.TIME_OUT, Long.parseLong(VIDGeneratorConstant.CONFIG_SERVER_FETCH_TIME_OUT)))));
+
+			ConfigRetrieverOptions options = new ConfigRetrieverOptions();
+			configStores.forEach(options::addStore);
+			ConfigRetriever retriever = ConfigRetriever.create(vertx, options.setScanPeriod(0));
+
+			LOGGER.info("🔁 Retrieving configuration from Spring Config Server...");
+
+			retriever.getConfig(result -> {
+				if (result.succeeded()) {
+					JsonObject jsonObject = result.result();
 					if (jsonObject != null) {
-						jsonObject.iterator().forEachRemaining(sourceValue -> System.setProperty(sourceValue.getKey(),
-								sourceValue.getValue().toString()));
+						jsonObject.forEach(entry ->
+							System.setProperty(entry.getKey(), entry.getValue().toString()));
 					}
-					json.mapEmpty();
-					retriever.close();
-					vertx.close();
-					startApplication();
+					LOGGER.info("✅ Configuration loaded from Config Server.");
 				} else {
-					LOGGER.warn(json.cause().getMessage() + "\n");
-					json.otherwiseEmpty();
-					retriever.close();
-					vertx.close();
-					startApplication();
+					LOGGER.warn("⚠️ Failed to fetch config from server: " + result.cause().getMessage());
 				}
+				retriever.close();
+				vertx.close();
+				startApplication();
+				latch.countDown();  // ✅ Allow main to continue
 			});
-		} catch (Exception exception) {
-			LOGGER.warn(exception.getMessage() + "\n");
+		} catch (Exception e) {
+			LOGGER.warn("❌ Error during config loading: " + e.getMessage());
 			vertx.close();
 			startApplication();
+			latch.countDown();  // ✅ Allow main to continue
 		}
 	}
 
@@ -155,9 +166,13 @@ public class IDGeneratorVertxApplication {
 	 */
 	private static void startApplication() {
 		ApplicationContext context = new AnnotationConfigApplicationContext(HibernateDaoConfig.class);
+		vertx.deployVerticle(new HttpServerVerticle(context));
 		CompletableFuture.runAsync(() -> startVIDPoolRuntime(context));
 		CompletableFuture.runAsync(() -> startUINPoolRuntime(context));
-
+		
+		// No need to block main thread if Vert.x is running with event loops
+		LOGGER.info("✅ Application started and background workers running.");
+		
 		/*
 		 * VertxOptions options = new VertxOptions(); options.setMetricsOptions(new
 		 * MicrometerMetricsOptions() .setPrometheusOptions(new
