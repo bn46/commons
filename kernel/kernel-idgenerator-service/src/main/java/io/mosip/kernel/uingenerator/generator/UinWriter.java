@@ -79,25 +79,32 @@ public class UinWriter {
 		return session;
 	}
 
-	public void saveBatch(List<UinEntity> uinBatch) {
-		Session session = getSession();
+	public int saveBatch(List<UinEntity> batch) {
+		int successCount = 0;
+		EntityManager em = entityManager.getEntityManagerFactory().createEntityManager();
+		Session localSession = em.unwrap(Session.class);
 		try {
-			session.beginTransaction();
-			int batchSize = 50; // Can be tuned
-			for (int i = 0; i < uinBatch.size(); i++) {
-				session.save(uinBatch.get(i));
-				if (i % batchSize == 0 && i > 0) {
-					session.flush();
-					session.clear();
+			localSession.beginTransaction();
+			for (int i = 0; i < batch.size(); i++) {
+				localSession.save(batch.get(i));
+				successCount++;
+
+				// Flush and clear in chunks to avoid memory overhead
+				if (i % 50 == 0) {
+					localSession.flush();
+					localSession.clear();
 				}
 			}
-			session.getTransaction().commit();
+			localSession.getTransaction().commit();
 		} catch (Exception e) {
-			session.getTransaction().rollback();
-			throw e; // rethrow so upstream handles it
+			if (localSession.getTransaction().isActive()) {
+				localSession.getTransaction().rollback();
+			}
+			throw e;
 		} finally {
-			session.clear();
+			localSession.close();
 		}
+		return successCount;
 	}
 	
 	public void closeSession() {
