@@ -1,10 +1,9 @@
 package io.mosip.kernel.uingenerator.generator;
 
-import java.math.BigInteger;
 import java.security.SecureRandom;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
-
-import jakarta.annotation.PostConstruct;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,6 +20,7 @@ import io.mosip.kernel.uingenerator.util.UINMetaDataUtil;
 import io.mosip.kernel.uingenerator.util.UinFilterUtil;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
+import jakarta.annotation.PostConstruct;
 
 /**
  * This class generates a list of uins
@@ -76,6 +76,8 @@ public class UinGeneratorImpl implements UinGenerator {
 	@Value("${mosip.idgen.uin.secure-random-reinit-frequency:45}")
 	private int reInitSecureRandomFrequency;
 
+	private Set<String> generatedSet = new HashSet<>();
+
 	@PostConstruct
 	private void init() {
 		ThreadPoolTaskScheduler taskScheduler = new ThreadPoolTaskScheduler();
@@ -86,7 +88,6 @@ public class UinGeneratorImpl implements UinGenerator {
 	}
 
 	private class ReInitSecureRandomTask implements Runnable {
-
 		public void run() {
 			initializeSecureRandom();
 		}
@@ -125,17 +126,26 @@ public class UinGeneratorImpl implements UinGenerator {
 		long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
 		uinWriter.setSession();
 		while (uinCount < noOfUINToGenerate) {
-			String generatedUIN = generateSingleId(generatedIdLength, lowerBound, upperBound);
-			if (uinFilterUtils.isValidId(generatedUIN) && !uinService.uinExist(generatedUIN)) {
-				UinEntity uinBean = new UinEntity(generatedUIN, uinDefaultStatus);
-				metaDataUtil.setCreateMetaData(uinBean);
-				// try {
-				uinWriter.persistUin(uinBean);
-				uinCount++;
-				/*
-				 * } catch (Exception e) { //Skinping on PK violation e.printStackTrace(); }
-				 */
-			}
+			/*
+			 * String generatedUIN = generateSingleId(generatedIdLength, lowerBound,
+			 * upperBound); if (uinFilterUtils.isValidId(generatedUIN) &&
+			 * !uinService.uinExist(generatedUIN)) { UinEntity uinBean = new
+			 * UinEntity(generatedUIN, uinDefaultStatus);
+			 * metaDataUtil.setCreateMetaData(uinBean); uinWriter.persistUin(uinBean);
+			 * uinCount++; }
+			 */
+			String generatedUIN = null;
+			do {
+				generatedUIN = generateSingleId(generatedIdLength, lowerBound, upperBound);
+			} while (generatedSet.contains(generatedUIN) || !uinFilterUtils.isValidId(generatedUIN)
+					|| uinService.uinExist(generatedUIN));
+
+			generatedSet.add(generatedUIN); // add only after confirming uniqueness
+
+			UinEntity uinBean = new UinEntity(generatedUIN, uinDefaultStatus);
+			metaDataUtil.setCreateMetaData(uinBean);
+			uinWriter.persistUin(uinBean);
+			uinCount++;
 		}
 		uinWriter.closeSession();
 		LOGGER.info("Generated {} uins ", uinsCount);
@@ -151,11 +161,16 @@ public class UinGeneratorImpl implements UinGenerator {
 	 */
 	private String generateSingleId(int generatedIdLength, long lowerBound, long upperBound) {
 		byte[] randomSeedBytes = new byte[generatedIdLength];
-		if(random==null) {
+		if (random == null) {
 			initializeSecureRandom();
 		}
 		random.nextBytes(randomSeedBytes);
-		String generatedID = new BigInteger(randomSeedBytes).abs().toString().substring(0, generatedIdLength);
+		long range = upperBound - lowerBound + 1;
+		long randomNumber = (Math.abs(random.nextLong()) % range) + lowerBound;
+		String generatedID = String.format("%0" + generatedIdLength + "d", randomNumber);
+
+		// String generatedID = new
+		// BigInteger(randomSeedBytes).abs().toString().substring(0, generatedIdLength);
 		String verhoeffDigit = ChecksumUtils.generateChecksumDigit(String.valueOf(generatedID));
 		return appendChecksum(generatedIdLength, generatedID, verhoeffDigit);
 	}
@@ -168,10 +183,14 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * @param verhoeffDigit     The checksum to append
 	 * @return uin with checksum
 	 */
+	/*
+	 * private String appendChecksum(int generatedIdLength, String generatedID,
+	 * String verhoeffDigit) { StringBuilder uinStringBuilder = new StringBuilder();
+	 * uinStringBuilder.setLength(uinLength); return uinStringBuilder.insert(0,
+	 * generatedID).insert(generatedID.length(), verhoeffDigit).toString().trim(); }
+	 */
+	
 	private String appendChecksum(int generatedIdLength, String generatedID, String verhoeffDigit) {
-		StringBuilder uinStringBuilder = new StringBuilder();
-		uinStringBuilder.setLength(uinLength);
-		return uinStringBuilder.insert(0, generatedID).insert(generatedID.length(), verhoeffDigit).toString().trim();
+		return generatedID + verhoeffDigit;
 	}
-
 }
