@@ -102,14 +102,20 @@ public class IDGeneratorVertxApplication {
 		System.setProperty("vertx.logger-delegate-factory-class-name", SLF4JLogDelegateFactory.class.getName());
 		LOGGER = LoggerFactory.getLogger(IDGeneratorVertxApplication.class);
 
-		CountDownLatch latch = new CountDownLatch(1);
-		loadPropertiesFromConfigServer(latch);
+		// Trigger config load and full app startup in background
+		CompletableFuture.runAsync(() -> {
+			CountDownLatch latch = new CountDownLatch(1);
+			loadPropertiesFromConfigServer(latch);
 
-		try {
-			latch.await(); // Wait until config is fetched and application starts
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-		}
+			try {
+				latch.await(); // Wait for config load and startup to complete
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+
+		// ✅ No blocking on main thread here
+		LOGGER.info("🟢 Main thread continues without blocking.");
 	}
 
 	/**
@@ -166,7 +172,6 @@ public class IDGeneratorVertxApplication {
 	 */
 	private static void startApplication() {
 		ApplicationContext context = new AnnotationConfigApplicationContext(HibernateDaoConfig.class);
-		vertx.deployVerticle(new HttpServerVerticle(context));
 		CompletableFuture.runAsync(() -> startVIDPoolRuntime(context));
 		CompletableFuture.runAsync(() -> startUINPoolRuntime(context));
 		

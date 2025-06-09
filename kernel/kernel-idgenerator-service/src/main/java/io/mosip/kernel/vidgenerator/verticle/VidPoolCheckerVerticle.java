@@ -36,7 +36,8 @@ public class VidPoolCheckerVerticle extends AbstractVerticle {
 		this.context = context;
 		this.vidService = this.context.getBean(VidService.class);
 		this.environment = this.context.getBean(Environment.class);
-		this.threshold = Objects.requireNonNullElse(environment.getProperty("mosip.kernel.vid.min-unused-threshold", Long.class), 0L);
+		this.threshold = Objects
+				.requireNonNullElse(environment.getProperty("mosip.kernel.vid.min-unused-threshold", Long.class), 0L);
 	}
 
 	private AtomicBoolean locked = new AtomicBoolean(false);
@@ -95,17 +96,17 @@ public class VidPoolCheckerVerticle extends AbstractVerticle {
 	}
 
 	private void deployHttpVerticle(long start) {
-		/*
-		 * Verticle httpVerticle = new HttpServerVerticle(context); DeploymentOptions
-		 * opts = new DeploymentOptions(); vertx.deployVerticle(httpVerticle, opts, res
-		 * -> { if (res.failed()) { LOGGER.info("Failed to deploy verticle " +
-		 * httpVerticle.getClass().getSimpleName() + " " + res.cause()); } else if
-		 * (res.succeeded()) {
-		 * LOGGER.info("population of pool is done starting fetcher verticle");
-		 * LOGGER.info("Starting vidgenerator service... ");
-		 * LOGGER.info("service took {} ms to pool and start",
-		 * (System.currentTimeMillis() - start)); LOGGER.info("Deployed verticle " +
-		 * httpVerticle.getClass().getSimpleName()); } });
-		 */
+		Verticle httpVerticle = new HttpServerVerticle(context);
+		DeploymentOptions opts = new DeploymentOptions();
+		vertx.deployVerticle(httpVerticle, opts, res -> {
+			if (res.failed()) {
+				LOGGER.info("Failed to deploy verticle " + httpVerticle.getClass().getSimpleName() + " " + res.cause());
+			} else if (res.succeeded()) {
+				LOGGER.info("population of pool is done starting fetcher verticle");
+				LOGGER.info("Starting vidgenerator service... ");
+				LOGGER.info("service took {} ms to pool and start", (System.currentTimeMillis() - start));
+				LOGGER.info("Deployed verticle " + httpVerticle.getClass().getSimpleName());
+			}
+		});
 	}
 }
