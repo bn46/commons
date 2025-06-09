@@ -161,7 +161,7 @@ public class UinGeneratorImpl implements UinGenerator {
 		long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
 
 		int threads = 4;
-		int batchSize = 5000;
+		int batchSize = 500;
 		int totalBatches = (int) (noOfUINToGenerate / (threads * batchSize));
 		Set<String> globalGeneratedSet = ConcurrentHashMap.newKeySet();
 

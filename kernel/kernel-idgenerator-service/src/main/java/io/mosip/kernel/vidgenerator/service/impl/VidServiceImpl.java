@@ -2,12 +2,13 @@ package io.mosip.kernel.vidgenerator.service.impl;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -55,10 +56,6 @@ public class VidServiceImpl implements VidService {
 		VidEntity vidEntity = null;
 		try {
 			vidEntity = vidRepository.findFirstByStatus(VidLifecycleStatus.AVAILABLE);
-		} catch (DataAccessException exception) {
-			LOGGER.error(ExceptionUtils.parseException(exception));
-			throw new VidGeneratorServiceException(VIDGeneratorErrorCode.INTERNAL_SERVER_ERROR.getErrorCode(),
-					exception.getMessage(), exception.getCause());
 		} catch (Exception exception) {
 			LOGGER.error(ExceptionUtils.parseException(exception));
 			throw new VidGeneratorServiceException(VIDGeneratorErrorCode.INTERNAL_SERVER_ERROR.getErrorCode(),
@@ -72,10 +69,6 @@ public class VidServiceImpl implements VidService {
 			try {
 				vidRepository.updateVid(VidLifecycleStatus.ASSIGNED, authHandler.getContextUser(routingContext),
 						DateUtils.getUTCCurrentDateTime(), vidEntity.getVid());
-			} catch (DataAccessException exception) {
-				LOGGER.error(ExceptionUtils.parseException(exception));
-				throw new VidGeneratorServiceException(VIDGeneratorErrorCode.INTERNAL_SERVER_ERROR.getErrorCode(),
-						exception.getMessage(), exception.getCause());
 			} catch (Exception exception) {
 				LOGGER.error(ExceptionUtils.parseException(exception));
 				throw new VidGeneratorServiceException(VIDGeneratorErrorCode.INTERNAL_SERVER_ERROR.getErrorCode(),
@@ -94,13 +87,10 @@ public class VidServiceImpl implements VidService {
 		long vidCount = 0;
 		try {
 			vidCount = vidRepository.countByStatusAndIsDeletedFalse(status);
-		} catch (DataAccessException exception) {
-			LOGGER.error(ExceptionUtils.parseException(exception));
 		} catch (Exception exception) {
 			LOGGER.error(ExceptionUtils.parseException(exception));
 		}
 		return vidCount;
-
 	}
 
 	@Override
@@ -108,8 +98,6 @@ public class VidServiceImpl implements VidService {
 		try {
 			expireEligibleVids();
 			releaseEligibleVids();
-		} catch (DataAccessException exception) {
-			LOGGER.error(ExceptionUtils.parseException(exception));
 		} catch (Exception exception) {
 			LOGGER.error(ExceptionUtils.parseException(exception));
 		}
@@ -163,9 +151,6 @@ public class VidServiceImpl implements VidService {
 				this.vidAssignedRepository.existsById(vid.getVid()))) {
 			try {
 				this.vidRepository.saveAndFlush(vid);
-			} catch (DataAccessException exception) {
-				LOGGER.error(ExceptionUtils.parseException(exception));
-				return false;
 			} catch (Exception exception) {
 				LOGGER.error(ExceptionUtils.parseException(exception));
 				return false;
@@ -174,9 +159,37 @@ public class VidServiceImpl implements VidService {
 		} else {
 			return false;
 		}
-
 	}
 
+	@Override
+	@Transactional
+	public int saveVIDsInBulk(List<VidEntity> vidList) {
+		if (vidList == null || vidList.isEmpty()) return 0;
+
+		List<String> vidIds = vidList.stream().map(VidEntity::getVid).toList();
+
+		// Check for already existing VIDs
+		Set<String> existingVids = new HashSet<>();
+		existingVids.addAll(
+			vidRepository.findAllById(vidIds).stream().map(VidEntity::getVid).toList()
+		);
+		existingVids.addAll(
+			vidAssignedRepository.findAllById(vidIds).stream().map(VidAssignedEntity::getVid).toList()
+		);
+
+		List<VidEntity> filtered = vidList.stream()
+			.filter(vid -> !existingVids.contains(vid.getVid()))
+			.toList();
+
+		try {
+			vidRepository.saveAll(filtered);
+			return filtered.size();
+		} catch (Exception e) {
+			LOGGER.error(ExceptionUtils.parseException(e));
+			return 0;
+		}
+	}
+	
 	@Transactional(transactionManager = "transactionManager")
 	@Override
 	public void isolateAssignedVids() {
