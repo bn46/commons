@@ -1,0 +1,1 @@
+java -jar target/kernel-idgenerator-service-1.2.1-SNAPSHOT.jar
