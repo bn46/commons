@@ -1,8 +1,14 @@
 package io.mosip.kernel.uingenerator.generator;
 
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
@@ -118,39 +124,89 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * 
 	 * @see io.mosip.kernel.core.spi.idgenerator.IdGenerator#generateId()
 	 */
+	/*	@Override
+	 * public void generateId(long noOfUINToGenerate) { int generatedIdLength =
+	 * uinLength - 1; long uinCount = 0; long upperBound =
+	 * Long.parseLong(StringUtils.repeat(UinGeneratorConstant.NINE,
+	 * generatedIdLength)); long lowerBound =
+	 * Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO,
+	 * generatedIdLength)); uinWriter.setSession(); while (uinCount <
+	 * noOfUINToGenerate) {
+	 * 
+	 * String generatedUIN = generateSingleId(generatedIdLength, lowerBound,
+	 * upperBound); if (uinFilterUtils.isValidId(generatedUIN) &&
+	 * !uinService.uinExist(generatedUIN)) { UinEntity uinBean = new
+	 * UinEntity(generatedUIN, uinDefaultStatus);
+	 * metaDataUtil.setCreateMetaData(uinBean); uinWriter.persistUin(uinBean);
+	 * uinCount++; }
+	 * 
+	 * String generatedUIN = null; do { generatedUIN =
+	 * generateSingleId(generatedIdLength, lowerBound, upperBound); } while
+	 * (generatedSet.contains(generatedUIN) ||
+	 * !uinFilterUtils.isValidId(generatedUIN) ||
+	 * uinService.uinExist(generatedUIN));
+	 * 
+	 * generatedSet.add(generatedUIN); // add only after confirming uniqueness
+	 * 
+	 * UinEntity uinBean = new UinEntity(generatedUIN, uinDefaultStatus);
+	 * metaDataUtil.setCreateMetaData(uinBean); uinWriter.persistUin(uinBean);
+	 * uinCount++; } uinWriter.closeSession(); LOGGER.info("Generated {} uins ",
+	 * uinsCount); }
+	 */
+	
 	@Override
 	public void generateId(long noOfUINToGenerate) {
 		int generatedIdLength = uinLength - 1;
-		long uinCount = 0;
 		long upperBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.NINE, generatedIdLength));
 		long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
-		uinWriter.setSession();
-		while (uinCount < noOfUINToGenerate) {
-			/*
-			 * String generatedUIN = generateSingleId(generatedIdLength, lowerBound,
-			 * upperBound); if (uinFilterUtils.isValidId(generatedUIN) &&
-			 * !uinService.uinExist(generatedUIN)) { UinEntity uinBean = new
-			 * UinEntity(generatedUIN, uinDefaultStatus);
-			 * metaDataUtil.setCreateMetaData(uinBean); uinWriter.persistUin(uinBean);
-			 * uinCount++; }
-			 */
-			String generatedUIN = null;
-			do {
-				generatedUIN = generateSingleId(generatedIdLength, lowerBound, upperBound);
-			} while (generatedSet.contains(generatedUIN) || !uinFilterUtils.isValidId(generatedUIN)
-					|| uinService.uinExist(generatedUIN));
 
-			generatedSet.add(generatedUIN); // add only after confirming uniqueness
+		int threads = 4;
+		int batchSize = 5000;
+		int totalBatches = (int) (noOfUINToGenerate / (threads * batchSize));
+		Set<String> globalGeneratedSet = ConcurrentHashMap.newKeySet();
 
-			UinEntity uinBean = new UinEntity(generatedUIN, uinDefaultStatus);
-			metaDataUtil.setCreateMetaData(uinBean);
-			uinWriter.persistUin(uinBean);
-			uinCount++;
+		ExecutorService executor = Executors.newFixedThreadPool(threads);
+		List<Callable<Void>> tasks = new ArrayList<>();
+
+		for (int i = 0; i < threads; i++) {
+			tasks.add(() -> {
+				try {
+					for (int b = 0; b < totalBatches; b++) {
+						List<UinEntity> batch = new ArrayList<>(batchSize);
+						while (batch.size() < batchSize) {
+							String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
+							if (globalGeneratedSet.add(uin) && uinFilterUtils.isValidId(uin) && !uinService.uinExist(uin)) {
+								UinEntity uinBean = new UinEntity(uin, uinDefaultStatus);
+								metaDataUtil.setCreateMetaData(uinBean);
+								batch.add(uinBean);
+							}
+						}
+						// Perform batch insert
+						uinWriter.setSession();
+						for (UinEntity entity : batch) {
+							uinWriter.persistUin(entity);
+						}
+						uinWriter.closeSession();
+					}
+				} catch (Exception e) {
+					LOGGER.error("❌ UIN generation thread failed", e);
+				}
+				return null;
+			});
 		}
-		uinWriter.closeSession();
-		LOGGER.info("Generated {} uins ", uinsCount);
-	}
 
+		try {
+			executor.invokeAll(tasks);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			LOGGER.error("❌ UIN generation interrupted", e);
+		} finally {
+			executor.shutdown();
+		}
+
+		LOGGER.info("✅ Generated total of {} UINs", noOfUINToGenerate);
+	}
+	
 	/**
 	 * Generates a id and then generate checksum
 	 * 
@@ -189,7 +245,7 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * uinStringBuilder.setLength(uinLength); return uinStringBuilder.insert(0,
 	 * generatedID).insert(generatedID.length(), verhoeffDigit).toString().trim(); }
 	 */
-	
+
 	private String appendChecksum(int generatedIdLength, String generatedID, String verhoeffDigit) {
 		return generatedID + verhoeffDigit;
 	}

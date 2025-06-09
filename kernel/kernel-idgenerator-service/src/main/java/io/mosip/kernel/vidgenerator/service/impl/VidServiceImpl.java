@@ -113,7 +113,6 @@ public class VidServiceImpl implements VidService {
 		} catch (Exception exception) {
 			LOGGER.error(ExceptionUtils.parseException(exception));
 		}
-
 	}
 
 	private void expireEligibleVids() {
@@ -160,7 +159,6 @@ public class VidServiceImpl implements VidService {
 
 	@Override
 	public boolean saveVID(VidEntity vid) {
-
 		if (!(this.vidRepository.existsById(vid.getVid()) || 
 				this.vidAssignedRepository.existsById(vid.getVid()))) {
 			try {
