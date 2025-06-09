@@ -7,9 +7,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Stream;
-
-import jakarta.annotation.PostConstruct;
 
 import org.apache.commons.io.IOUtils;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,7 +20,6 @@ import io.mosip.kernel.core.templatemanager.spi.TemplateManager;
 import io.mosip.kernel.core.util.FileUtils;
 import io.mosip.kernel.idgenerator.config.ConfigUrlsBuilder;
 import io.mosip.kernel.idgenerator.config.HibernateDaoConfig;
-import io.mosip.kernel.idgenerator.verticle.HttpServerVerticle;
 import io.mosip.kernel.templatemanager.velocity.builder.TemplateManagerBuilderImpl;
 import io.mosip.kernel.uingenerator.constant.UinGeneratorConstant;
 import io.mosip.kernel.uingenerator.verticle.UinGeneratorVerticle;
@@ -46,6 +44,7 @@ import io.vertx.core.logging.LoggerFactory;
 import io.vertx.core.logging.SLF4JLogDelegateFactory;
 import io.vertx.micrometer.MicrometerMetricsOptions;
 import io.vertx.micrometer.VertxPrometheusOptions;
+import jakarta.annotation.PostConstruct;
 
 /**
  * ID Generator Vertx Application
@@ -90,14 +89,6 @@ public class IDGeneratorVertxApplication {
 		} catch (Exception e) {
 			LOGGER.warn(e.getMessage());
 		}
-	}
-
-	@PostConstruct
-	private static void initVIDPool() {
-		LOGGER.info("Service will be started after pooling vids..");
-		EventBus eventBus = vertx.eventBus();
-		LOGGER.info("eventBus deployer {}", eventBus);
-		eventBus.publish(EventType.INITPOOL, EventType.INITPOOL);
 	}
 
 	/**
@@ -164,26 +155,84 @@ public class IDGeneratorVertxApplication {
 	 */
 	private static void startApplication() {
 		ApplicationContext context = new AnnotationConfigApplicationContext(HibernateDaoConfig.class);
-		VertxOptions options = new VertxOptions();
-		options.setMetricsOptions(new MicrometerMetricsOptions()
-                .setPrometheusOptions(new VertxPrometheusOptions().setEnabled(true))
-                .setEnabled(true));
-		DeploymentOptions workerOptions = new DeploymentOptions().setWorker(true);
+		CompletableFuture.runAsync(() -> startVIDPoolRuntime(context));
+		CompletableFuture.runAsync(() -> startUINPoolRuntime(context));
+
+		/*
+		 * VertxOptions options = new VertxOptions(); options.setMetricsOptions(new
+		 * MicrometerMetricsOptions() .setPrometheusOptions(new
+		 * VertxPrometheusOptions().setEnabled(true)) .setEnabled(true));
+		 * DeploymentOptions workerOptions = new DeploymentOptions().setWorker(true);
+		 * vertx = Vertx.vertx(options); Verticle[] workerVerticles = { new
+		 * VidPoolCheckerVerticle(context), new VidPopulatorVerticle(context), new
+		 * VidExpiryVerticle(context), new VidIsolatorVerticle(context) };
+		 * Stream.of(workerVerticles).forEach(verticle -> deploy(verticle,
+		 * workerOptions, vertx)); vertx.setTimer(1000, handler -> initVIDPool());
+		 * Verticle[] uinVerticles = { new UinGeneratorVerticle(context),new
+		 * UinTransferVerticle(context)}; Stream.of(uinVerticles).forEach(verticle ->
+		 * vertx.deployVerticle(verticle, stringAsyncResult -> { if
+		 * (stringAsyncResult.succeeded()) { LOGGER.info("Successfully deployed: " +
+		 * verticle.getClass().getSimpleName()); } else {
+		 * LOGGER.info("Failed to deploy:" + verticle.getClass().getSimpleName() +
+		 * "\nCause: " + stringAsyncResult.cause()); } })); vertx.setTimer(1000, handler
+		 * -> initUINPool());
+		 */	
+	}
+
+	public static void startVIDPoolRuntime(ApplicationContext context) {
+		VertxOptions options = new VertxOptions()
+			.setMetricsOptions(new MicrometerMetricsOptions()
+				.setPrometheusOptions(new VertxPrometheusOptions().setEnabled(true))
+				.setEnabled(true));
 		vertx = Vertx.vertx(options);
-		Verticle[] workerVerticles = { new VidPoolCheckerVerticle(context), new VidPopulatorVerticle(context),
-				new VidExpiryVerticle(context), new VidIsolatorVerticle(context) };
-		Stream.of(workerVerticles).forEach(verticle -> deploy(verticle, workerOptions, vertx));
+
+		DeploymentOptions workerOptions = new DeploymentOptions().setWorker(true);
+		Verticle[] vidVerticles = {
+			new VidPoolCheckerVerticle(context),
+			new VidPopulatorVerticle(context),
+			new VidExpiryVerticle(context),
+			new VidIsolatorVerticle(context)
+		};
+		Stream.of(vidVerticles).forEach(verticle -> deploy(verticle, workerOptions, vertx));
+
+		// Timer-based initialization
 		vertx.setTimer(1000, handler -> initVIDPool());
-		Verticle[] uinVerticles = { new UinGeneratorVerticle(context),new UinTransferVerticle(context)};
-		Stream.of(uinVerticles).forEach(verticle -> vertx.deployVerticle(verticle, stringAsyncResult -> {
-			if (stringAsyncResult.succeeded()) {
-				LOGGER.info("Successfully deployed: " + verticle.getClass().getSimpleName());
-			} else {
-				LOGGER.info("Failed to deploy:" + verticle.getClass().getSimpleName() + "\nCause: "
-						+ stringAsyncResult.cause());
-			}
-		}));
+	}
+
+	public static void startUINPoolRuntime(ApplicationContext context) {
+		if (vertx == null) {
+			VertxOptions options = new VertxOptions()
+				.setMetricsOptions(new MicrometerMetricsOptions()
+					.setPrometheusOptions(new VertxPrometheusOptions().setEnabled(true))
+					.setEnabled(true));
+			vertx = Vertx.vertx(options);
+		}
+
+		Verticle[] uinVerticles = {
+			new UinGeneratorVerticle(context),
+			new UinTransferVerticle(context)
+		};
+		Stream.of(uinVerticles).forEach(verticle ->
+			vertx.deployVerticle(verticle, result -> {
+				if (result.succeeded()) {
+					LOGGER.info("Successfully deployed: " + verticle.getClass().getSimpleName());
+				} else {
+					LOGGER.info("Failed to deploy: " + verticle.getClass().getSimpleName() +
+								"\nCause: " + result.cause());
+				}
+			})
+		);
+
+		// Timer-based initialization
 		vertx.setTimer(1000, handler -> initUINPool());
+	}
+	
+	@PostConstruct
+	private static void initVIDPool() {
+		LOGGER.info("Service will be started after pooling vids..");
+		EventBus eventBus = vertx.eventBus();
+		LOGGER.info("eventBus deployer {}", eventBus);
+		eventBus.publish(EventType.INITPOOL, EventType.INITPOOL);
 	}
 
 	@PostConstruct
@@ -194,14 +243,12 @@ public class IDGeneratorVertxApplication {
 		eventBus.publish(UinGeneratorConstant.UIN_GENERATOR_ADDRESS, UinGeneratorConstant.GENERATE_UIN);
 	}
 
-
 	private static void deploy(Verticle verticle, DeploymentOptions opts, Vertx vertx) {
 		vertx.deployVerticle(verticle, opts, res -> {
 			if (res.failed()) {
 				LOGGER.info("Failed to deploy verticle " + verticle.getClass().getSimpleName() + " " + res.cause());
 			} else if (res.succeeded()) {
 				LOGGER.info("Deployed verticle " + verticle.getClass().getSimpleName());
-
 			}
 		});
 	}
