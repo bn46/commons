@@ -1,6 +1,7 @@
 package io.mosip.kernel.vidgenerator.verticle;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -58,86 +59,77 @@ public class VidPopulatorVerticle extends AbstractVerticle {
 	 * LOGGER.info("No of vids persisted are {}", count); }); }
 	 */
 	
-	@Override
-    public void start(io.vertx.core.Future<Void> startFuture) {
-        vertx.eventBus().consumer(EventType.GENERATEPOOL, handler -> {
-            long noOfFreeVids = Long.parseLong(handler.body().toString());
-            long noOfVidsToGenerate = vidToGenerate - noOfFreeVids;
-            LOGGER.info("Persisting {} vids in pool", noOfVidsToGenerate);
+	public void start(io.vertx.core.Future<Void> startFuture) {
+	    vertx.eventBus().consumer(EventType.GENERATEPOOL, handler -> {
+	        long noOfFreeVids = Long.parseLong(handler.body().toString());
+	        long noOfVidsToGenerate = vidToGenerate - noOfFreeVids;
+	        LOGGER.info("📦 Persisting {} VIDs in pool", noOfVidsToGenerate);
 
-            int batchSize = 5000; // Optimized batch size
-            int adjustedBatchSize = (int) Math.min(batchSize, noOfVidsToGenerate);
-            Set<String> generatedSet = new HashSet<>((int) noOfVidsToGenerate);
+	        int batchSize = 5000;
+	        int adjustedBatchSize = (int) Math.min(batchSize, noOfVidsToGenerate);
+	        Set<String> generatedSet = new HashSet<>((int) noOfVidsToGenerate);
 
-            vertx.executeBlocking(promise -> {
-            	long startTime = System.nanoTime(); // ⏱️ Start timing
-                try {
-                    long count = 0;
-                    List<VidEntity> batch = new ArrayList<>(batchSize);
+	        vertx.executeBlocking(promise -> {
+	            long startTime = System.nanoTime();
+	            try {
+	                long count = 0;
+	                List<VidEntity> batch = new ArrayList<>(adjustedBatchSize);
 
-                    while (count < noOfVidsToGenerate) {
-                        // Pre-generate candidates to reduce failed attempts
-                        List<String> candidates = new ArrayList<>(10);
-                        for (int i = 0; i < 10 && count < noOfVidsToGenerate; i++) {
-                            candidates.add(vidGenerator.generateId());
-                        }
-                        for (String vid : candidates) {
-                            if (generatedSet.add(vid)) {
-                                VidEntity entity = new VidEntity();
-                                entity.setVid(vid);
-                                entity.setStatus(VidLifecycleStatus.AVAILABLE);
-                                metaDataUtil.setCreateMetaData(entity);
-                                batch.add(entity);
-                                count++;
-                                break;
-                            }
-                        }
+	                while (count < noOfVidsToGenerate) {
+	                    // Generate VIDs until batch is full or count limit reached
+	                    while (batch.size() < adjustedBatchSize && count < noOfVidsToGenerate) {
+	                        String vid = vidGenerator.generateId();
+	                        if (generatedSet.add(vid)) {
+	                            VidEntity entity = new VidEntity();
+	                            entity.setVid(vid);
+	                            entity.setStatus(VidLifecycleStatus.AVAILABLE);
+	                            metaDataUtil.setCreateMetaData(entity);
+	                            batch.add(entity);
+	                            count++;
+	                        }
+	                    }
 
-                        if (batch.size() >= adjustedBatchSize  || count == noOfVidsToGenerate) {
-                            int inserted = vidWriter.persistVidsInBulk(batch);
-                            if (inserted < batch.size()) {
-                                LOGGER.warn("Duplicates detected, inserted {} of {} VIDs, retrying individually...", inserted, batch.size());
-                                // Retry failed VIDs individually
-                                List<VidEntity> failedBatch = new ArrayList<>(batch.subList(inserted, batch.size()));
-                                batch.clear();
-                                for (VidEntity entityToRetry : failedBatch) {
-                                    if (generatedSet.contains(entityToRetry.getVid())) {
-                                        List<VidEntity> single = new ArrayList<>(1);
-                                        single.add(entityToRetry);
-                                        int singleInserted = vidWriter.persistVidsInBulk(single);
-                                        if (singleInserted == 0) {
-                                            LOGGER.warn("Failed VID: {}, will retry later", entityToRetry.getVid());
-                                            count--;
-                                            generatedSet.remove(entityToRetry.getVid());
-                                        }
-                                    } else {
-                                        count--;
-                                    }
-                                }
-                            } else {
-                                batch.clear();
-                            }
-                        }
-                    }
-                    long endTime = System.nanoTime(); // ⏱️ End timing
-                    long durationMillis = (endTime - startTime) / 1_000_000;
+	                    if (!batch.isEmpty()) {
+	                        int inserted = vidWriter.persistVidsInBulk(batch);
+	                        if (inserted < batch.size()) {
+	                            LOGGER.warn("⚠️ Duplicates detected: inserted {} of {}, retrying failed VIDs...", inserted, batch.size());
 
-                    LOGGER.info("✅ Total VIDs persisted: {}", count);
-                    LOGGER.info("⏱️ Total time taken for VIDs persisted: {} ms (~{} seconds)", durationMillis, durationMillis / 1000);
-                    promise.complete(count);
-                } catch (Exception e) {
-                    LOGGER.error("❌ Error during VID pool generation", e);
-                    promise.fail(e);
-                }
-            }, res -> {
-                if (res.succeeded()) {
-                    handler.reply("pool population successful");
-                } else {
-                    handler.fail(500, "VID generation failed");
-                }
-            });
-        });
+	                            List<VidEntity> failedBatch = new ArrayList<>(batch.subList(inserted, batch.size()));
+	                            for (VidEntity entityToRetry : failedBatch) {
+	                                if (generatedSet.contains(entityToRetry.getVid())) {
+	                                    int retryInserted = vidWriter.persistVidsInBulk(Collections.singletonList(entityToRetry));
+	                                    if (retryInserted == 0) {
+	                                        LOGGER.warn("❌ Retry failed for VID: {}", entityToRetry.getVid());
+	                                        count--;
+	                                        generatedSet.remove(entityToRetry.getVid());
+	                                    }
+	                                } else {
+	                                    count--;
+	                                }
+	                            }
+	                        }
+	                        batch.clear();
+	                    }
+	                }
 
-        startFuture.complete(); // Mark verticle startup as successful
-    }
+	                long endTime = System.nanoTime();
+	                long durationMillis = (endTime - startTime) / 1_000_000;
+	                LOGGER.info("✅ Total VIDs persisted: {}", count);
+	                LOGGER.info("⏱️ Time taken: {} ms (~{} seconds)", durationMillis, durationMillis / 1000);
+	                promise.complete(count);
+	            } catch (Exception e) {
+	                LOGGER.error("❌ VID pool generation error", e);
+	                promise.fail(e);
+	            }
+	        }, res -> {
+	            if (res.succeeded()) {
+	                handler.reply("Pool population successful");
+	            } else {
+	                handler.fail(500, "VID generation failed");
+	            }
+	        });
+	    });
+
+	    startFuture.complete(); // Mark verticle startup as successful
+	}
 }
