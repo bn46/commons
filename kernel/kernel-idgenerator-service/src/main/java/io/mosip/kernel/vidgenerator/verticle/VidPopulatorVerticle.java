@@ -130,5 +130,4 @@ public class VidPopulatorVerticle extends AbstractVerticle {
 
 		startFuture.complete(); // ✅ mark verticle startup as successful
 	}
-
 }

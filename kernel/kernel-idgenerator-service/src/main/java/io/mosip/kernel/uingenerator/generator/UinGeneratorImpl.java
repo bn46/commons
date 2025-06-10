@@ -28,6 +28,9 @@ import io.mosip.kernel.uingenerator.util.UinFilterUtil;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import jakarta.annotation.PostConstruct;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityManagerFactory;
+import jakarta.persistence.EntityTransaction;
 
 /**
  * This class generates a list of uins
@@ -58,6 +61,9 @@ public class UinGeneratorImpl implements UinGenerator {
 	 */
 	@Autowired
 	private UinWriter uinWriter;
+
+	@Autowired
+	private EntityManagerFactory entityManagerFactory;
 
 	/**
 	 * The logger instance
@@ -125,9 +131,9 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * 
 	 * @see io.mosip.kernel.core.spi.idgenerator.IdGenerator#generateId()
 	 */
-	/*	@Override
-	 * public void generateId(long noOfUINToGenerate) { int generatedIdLength =
-	 * uinLength - 1; long uinCount = 0; long upperBound =
+	/*
+	 * @Override public void generateId(long noOfUINToGenerate) { int
+	 * generatedIdLength = uinLength - 1; long uinCount = 0; long upperBound =
 	 * Long.parseLong(StringUtils.repeat(UinGeneratorConstant.NINE,
 	 * generatedIdLength)); long lowerBound =
 	 * Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO,
@@ -154,7 +160,7 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * uinCount++; } uinWriter.closeSession(); LOGGER.info("Generated {} uins ",
 	 * uinsCount); }
 	 */
-	
+
 	@Override
 	public void generateId(long noOfUINToGenerate) {
 		int generatedIdLength = uinLength - 1;
@@ -162,7 +168,27 @@ public class UinGeneratorImpl implements UinGenerator {
 		long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
 
 		int threads = 4;
-		int batchSize = 500;
+		int batchSize = 1000;
+
+		if (noOfUINToGenerate <= batchSize) {
+	        // 🔹 Small load: Single-threaded
+	        List<UinEntity> batch = new ArrayList<>();
+	        Set<String> generatedSet = new HashSet<>();
+	        long count = 0;
+	        while (count < noOfUINToGenerate) {
+	            String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
+	            if (generatedSet.add(uin) && uinFilterUtils.isValidId(uin) && !uinService.uinExist(uin)) {
+	                UinEntity entity = new UinEntity(uin, uinDefaultStatus);
+	                metaDataUtil.setCreateMetaData(entity);
+	                batch.add(entity);
+	                count++;
+	            }
+	        }
+	        uinWriter.saveBatch(batch);
+	        LOGGER.info("✅ Generated total of {} UINs (single-threaded)", noOfUINToGenerate);
+	        return;
+	    }
+		
 		AtomicLong globalCounter = new AtomicLong(0);
 		Set<String> globalGeneratedSet = ConcurrentHashMap.newKeySet();
 
@@ -171,23 +197,39 @@ public class UinGeneratorImpl implements UinGenerator {
 
 		for (int i = 0; i < threads; i++) {
 			tasks.add(() -> {
+				EntityManager em = entityManagerFactory.createEntityManager();
+				EntityTransaction tx = null;
 				try {
 					while (globalCounter.get() < noOfUINToGenerate) {
 						List<UinEntity> batch = new ArrayList<>(batchSize);
 						while (batch.size() < batchSize && globalCounter.get() < noOfUINToGenerate) {
 							String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
-							if (globalGeneratedSet.add(uin) && uinFilterUtils.isValidId(uin) && !uinService.uinExist(uin)) {
-								UinEntity uinBean = new UinEntity(uin, uinDefaultStatus);
-								metaDataUtil.setCreateMetaData(uinBean);
-								batch.add(uinBean);
+							if (globalGeneratedSet.add(uin) && uinFilterUtils.isValidId(uin)
+									&& !uinService.uinExist(uin)) {
+								UinEntity entity = new UinEntity(uin, uinDefaultStatus);
+								metaDataUtil.setCreateMetaData(entity);
+								batch.add(entity);
 								globalCounter.incrementAndGet();
 							}
 						}
-						// ⏩ Bulk insert
-						uinWriter.saveBatch(batch);
+
+						if (!batch.isEmpty()) {
+							tx = em.getTransaction();
+							tx.begin();
+							for (UinEntity entity : batch) {
+								em.persist(entity);
+							}
+							em.flush();
+							em.clear();
+							tx.commit();
+						}
 					}
 				} catch (Exception e) {
+					if (tx != null && tx.isActive())
+						tx.rollback();
 					LOGGER.error("❌ UIN generation thread failed", e);
+				} finally {
+					em.close();
 				}
 				return null;
 			});
@@ -202,10 +244,9 @@ public class UinGeneratorImpl implements UinGenerator {
 			executor.shutdown();
 		}
 
-		LOGGER.info("✅ Generated total of {} UINs", noOfUINToGenerate);
+		LOGGER.info("✅ Generated total of {} UINs (Multi-threaded)", noOfUINToGenerate);
 	}
 
-	
 	/**
 	 * Generates a id and then generate checksum
 	 * 

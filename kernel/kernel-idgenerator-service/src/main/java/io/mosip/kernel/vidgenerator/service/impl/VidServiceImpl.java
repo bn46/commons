@@ -28,6 +28,9 @@ import io.mosip.kernel.vidgenerator.utils.VIDMetaDataUtil;
 import io.vertx.core.logging.Logger;
 import io.vertx.core.logging.LoggerFactory;
 import io.vertx.ext.web.RoutingContext;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityManagerFactory;
+import jakarta.persistence.EntityTransaction;
 
 @Service
 public class VidServiceImpl implements VidService {
@@ -49,6 +52,9 @@ public class VidServiceImpl implements VidService {
 	@Autowired
 	private VertxAuthenticationProvider authHandler;
 
+	@Autowired
+	private EntityManagerFactory entityManagerFactory;
+	
 	@Override
 	@Transactional
 	public VidFetchResponseDto fetchVid(LocalDateTime vidExpiry, RoutingContext routingContext) {
@@ -181,13 +187,38 @@ public class VidServiceImpl implements VidService {
 			.filter(vid -> !existingVids.contains(vid.getVid()))
 			.toList();
 
+		if (filtered.isEmpty()) return 0;
+
+		// Perform batch insert with thread-local EntityManager
+		EntityManager em = entityManagerFactory.createEntityManager();
+		EntityTransaction tx = null;
+		int inserted = 0;
+
 		try {
-			vidRepository.saveAll(filtered);
-			return filtered.size();
+			tx = em.getTransaction();
+			tx.begin();
+
+			for (int i = 0; i < filtered.size(); i++) {
+				em.persist(filtered.get(i));
+				inserted++;
+
+				// Flush and clear periodically to avoid memory issues
+				if (i % 50 == 0) {
+					em.flush();
+					em.clear();
+				}
+			}
+
+			tx.commit();
 		} catch (Exception e) {
-			LOGGER.error(ExceptionUtils.parseException(e));
-			return 0;
+			if (tx != null && tx.isActive()) tx.rollback();
+			LOGGER.error("❌ Error in saveVIDsInBulk: {}", ExceptionUtils.parseException(e));
+			inserted = 0;
+		} finally {
+			em.close();
 		}
+
+		return inserted;
 	}
 	
 	@Transactional(transactionManager = "transactionManager")
