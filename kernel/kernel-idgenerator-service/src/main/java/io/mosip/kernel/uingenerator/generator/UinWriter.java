@@ -83,13 +83,14 @@ public class UinWriter {
 		int successCount = 0;
 		EntityManager em = entityManager.getEntityManagerFactory().createEntityManager();
 		Session localSession = em.unwrap(Session.class);
+
 		try {
 			localSession.beginTransaction();
 			for (int i = 0; i < batch.size(); i++) {
-				localSession.save(batch.get(i));
+				localSession.persist(batch.get(i));
 				successCount++;
 
-				// Flush and clear in chunks to avoid memory overhead
+				// Flush and clear periodically to avoid memory overhead
 				if (i % 50 == 0) {
 					localSession.flush();
 					localSession.clear();
