@@ -96,22 +96,17 @@ public class UinGeneratorImpl implements UinGenerator {
 	 *
 	 * Yes, but sufficient memory must be allocated.
 	 *
-	 * 📌 Memory Requirement Estimation:
-	 * Using the formula:
-	 *     m = -(n * ln(f)) / (ln(2)^2)
+	 * 📌 Memory Requirement Estimation: Using the formula: m = -(n * ln(f)) /
+	 * (ln(2)^2)
 	 *
-	 * Where:
-	 *     n = 1,000,000,000   // number of elements
-	 *     f = 0.001           // desired false positive rate (0.1%)
+	 * Where: n = 1,000,000,000 // number of elements f = 0.001 // desired false
+	 * positive rate (0.1%)
 	 *
-	 * Calculation:
-	 *     m ≈ 1,000,000,000 * 6.91 / 0.48 ≈ 14.4 billion bits
-	 *       ≈ 1.8 billion bytes
-	 *       ≈ 1.68 GB of RAM
+	 * Calculation: m ≈ 1,000,000,000 * 6.91 / 0.48 ≈ 14.4 billion bits ≈ 1.8
+	 * billion bytes ≈ 1.68 GB of RAM
 	 *
-	 * 🧠 Important:
-	 * - Increase JVM heap size using: -Xmx4g or higher
-	 * - Consider serializing the Bloom filter to disk to avoid rebuilding
+	 * 🧠 Important: - Increase JVM heap size using: -Xmx4g or higher - Consider
+	 * serializing the Bloom filter to disk to avoid rebuilding
 	 */
 	private BloomFilter<CharSequence> uinBloomFilter;
 
@@ -189,10 +184,9 @@ public class UinGeneratorImpl implements UinGenerator {
 
 	public void initializeBloomFilter() {
 		long expectedUinCount = Math.max(getExistingUinCountFromDB(), 100000); // Get UIN count for optimal sizing
-		this.uinBloomFilter = BloomFilter.create(Funnels.stringFunnel(StandardCharsets.UTF_8), expectedUinCount, 0.001 // 0.1%
-																														// false
-																														// positive
-																														// rate
+		this.uinBloomFilter = BloomFilter.create(Funnels.stringFunnel(StandardCharsets.UTF_8), 
+				expectedUinCount, 
+				0.001 // 0.1% false positive rate
 		);
 
 		LOGGER.info("📦 Preloading Bloom filter with ~{} UINs...", expectedUinCount);
@@ -234,87 +228,78 @@ public class UinGeneratorImpl implements UinGenerator {
 
 	@Override
 	public void generateId(long noOfUINToGenerate) {
-		LOGGER.info("✅ Started {} UINs (single-threaded, batched)", noOfUINToGenerate);
-		initializeBloomFilter();
+	    LOGGER.info("✅ Started {} UINs (single-threaded, batched)", noOfUINToGenerate);
+	    initializeBloomFilter();
 
-		long startTime = System.nanoTime(); // Start timer
+	    long startTime = System.nanoTime(); // Start timer
 
-		int generatedIdLength = uinLength - 1;
-		long upperBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.NINE, generatedIdLength));
-		long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
+	    int generatedIdLength = uinLength - 1;
+	    long upperBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.NINE, generatedIdLength));
+	    long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
 
-		int batchSize = 5000; // Optimized batch size
-		int adjustedBatchSize = (int) Math.min(batchSize, noOfUINToGenerate);
-		Set<String> generatedSet = new HashSet<>((int) noOfUINToGenerate);
-		EntityManager em = entityManagerFactory.createEntityManager();
-		EntityTransaction tx = em.getTransaction();
+	    int batchSize = 5000;
+	    int adjustedBatchSize = (int) Math.min(batchSize, noOfUINToGenerate);
 
-		try {
-			long count = 0;
-			List<UinEntity> batch = new ArrayList<>(batchSize);
+	    EntityManager em = entityManagerFactory.createEntityManager();
+	    EntityTransaction tx = em.getTransaction();
 
-			while (count < noOfUINToGenerate) {
-				String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
-				if (!uinBloomFilter.mightContain(uin)) {
-					// UIN not seen before according to the filter, add to it
-					uinBloomFilter.put(uin);
+	    try {
+	        long count = 0;
+	        List<UinEntity> batch = new ArrayList<>(batchSize);
 
-					if (generatedSet.add(uin) && uinFilterUtils.isValidId(uin)) {
-						UinEntity entity = new UinEntity(uin, uinDefaultStatus);
-						metaDataUtil.setCreateMetaData(entity);
-						batch.add(entity);
-						count++;
+	        while (count < noOfUINToGenerate) {
+	            String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
+	            if (!uinBloomFilter.mightContain(uin) && uinFilterUtils.isValidId(uin)) {
+	                uinBloomFilter.put(uin);
 
-						if (batch.size() >= adjustedBatchSize || count == noOfUINToGenerate) {
-							tx.begin();
-							try {
-								for (UinEntity batchEntity : batch) {
-									em.persist(batchEntity);
-								}
-								em.flush();
-								em.clear();
-								tx.commit();
-							} catch (PersistenceException e) {
-								tx.rollback();
-								LOGGER.warn("Duplicate UINs detected in batch, retrying individually...");
-								for (UinEntity entityToRetry : batch) {
-									EntityTransaction retryTx = em.getTransaction();
-									try {
-										retryTx.begin();
-										if (generatedSet.contains(entityToRetry.getUin())) {
-											em.persist(entityToRetry);
-											em.flush();
-											retryTx.commit();
-										} else {
-											retryTx.rollback();
-											count--;
-										}
-									} catch (Exception retryEx) {
-										retryTx.rollback();
-										LOGGER.warn("Failed UIN: {}, will retry later", entityToRetry.getUin());
-										count--;
-										generatedSet.remove(entityToRetry.getUin());
-									}
-								}
-							}
-							batch.clear();
-						}
-					}
-				}
-			}
-			long endTime = System.nanoTime(); // End timer
-			long durationMillis = (endTime - startTime) / 1_000_000;
-			LOGGER.info("✅ Generated {} UINs (single-threaded, batched)", noOfUINToGenerate);
-			LOGGER.info("⏱️ Total time taken for UINs (single-threaded, batched): {} ms (~{} seconds)", durationMillis,
-					durationMillis / 1000);
-		} catch (Exception e) {
-			if (tx.isActive()) {
-				tx.rollback();
-			}
-			LOGGER.error("❌ UIN generation failed", e);
-		} finally {
-			em.close();
-		}
+	                UinEntity entity = new UinEntity(uin, uinDefaultStatus);
+	                metaDataUtil.setCreateMetaData(entity);
+	                batch.add(entity);
+	                count++;
+
+	                if (batch.size() >= adjustedBatchSize || count == noOfUINToGenerate) {
+	                    tx.begin();
+	                    try {
+	                        for (UinEntity batchEntity : batch) {
+	                            em.persist(batchEntity);
+	                        }
+	                        em.flush();
+	                        em.clear();
+	                        tx.commit();
+	                    } catch (PersistenceException e) {
+	                        tx.rollback();
+	                        LOGGER.warn("Duplicate UINs detected in batch, retrying individually...");
+	                        for (UinEntity entityToRetry : batch) {
+	                            EntityTransaction retryTx = em.getTransaction();
+	                            try {
+	                                retryTx.begin();
+	                                em.persist(entityToRetry);
+	                                em.flush();
+	                                retryTx.commit();
+	                            } catch (Exception retryEx) {
+	                                retryTx.rollback();
+	                                LOGGER.warn("Failed UIN: {}, will retry later", entityToRetry.getUin());
+	                                count--; // adjust count to retry
+	                            }
+	                        }
+	                    }
+	                    batch.clear();
+	                }
+	            }
+	        }
+
+	        long endTime = System.nanoTime();
+	        long durationMillis = (endTime - startTime) / 1_000_000;
+	        LOGGER.info("✅ Generated {} UINs (single-threaded, batched)", noOfUINToGenerate);
+	        LOGGER.info("⏱️ Total time taken for (single-threaded, batched): {} ms (~{} seconds)", durationMillis, durationMillis / 1000);
+	    } catch (Exception e) {
+	        if (tx.isActive()) {
+	            tx.rollback();
+	        }
+	        LOGGER.error("❌ UIN generation failed", e);
+	    } finally {
+	        em.close();
+	    }
 	}
 
 	/**
