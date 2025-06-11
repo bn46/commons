@@ -1,11 +1,11 @@
 package io.mosip.kernel.uingenerator.generator;
 
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.commons.lang3.StringUtils;
@@ -13,6 +13,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.stereotype.Component;
+
+import com.google.common.hash.BloomFilter;
+import com.google.common.hash.Funnels;
 
 import io.mosip.kernel.core.idgenerator.spi.UinGenerator;
 import io.mosip.kernel.core.util.ChecksumUtils;
@@ -88,6 +91,9 @@ public class UinGeneratorImpl implements UinGenerator {
 
 	private Set<String> generatedSet = new HashSet<>();
 
+	private BloomFilter<CharSequence> uinBloomFilter;
+
+	@SuppressWarnings("deprecation")
 	@PostConstruct
 	private void init() {
 		ThreadPoolTaskScheduler taskScheduler = new ThreadPoolTaskScheduler();
@@ -128,6 +134,7 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * 
 	 * @see io.mosip.kernel.core.spi.idgenerator.IdGenerator#generateId()
 	 */
+
 	/*
 	 * @Override public void generateId(long noOfUINToGenerate) { int
 	 * generatedIdLength = uinLength - 1; long uinCount = 0; long upperBound =
@@ -157,83 +164,136 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * uinCount++; } uinWriter.closeSession(); LOGGER.info("Generated {} uins ",
 	 * uinsCount); }
 	 */
+
+	public void initializeBloomFilter() {
+		long expectedUinCount = Math.max(getExistingUinCountFromDB(), 100000); // Get UIN count for optimal sizing
+		this.uinBloomFilter = BloomFilter.create(Funnels.stringFunnel(StandardCharsets.UTF_8), expectedUinCount, 0.001 // 0.1%
+																														// false
+																														// positive
+																														// rate
+		);
+
+		LOGGER.info("📦 Preloading Bloom filter with ~{} UINs...", expectedUinCount);
+
+		EntityManager em = entityManagerFactory.createEntityManager();
+		try {
+			// Stream UINs in chunks to avoid memory pressure
+			int batchSize = 10000;
+			int offset = 0;
+			while (true) {
+				List<String> uins = em.createQuery("SELECT u.uin FROM UinEntity u", String.class).setFirstResult(offset)
+						.setMaxResults(batchSize).getResultList();
+
+				if (uins.isEmpty())
+					break;
+
+				for (String uin : uins) {
+					uinBloomFilter.put(uin);
+				}
+
+				offset += uins.size();
+				LOGGER.info("🔄 Loaded {} UINs into Bloom filter...", offset);
+			}
+
+			LOGGER.info("✅ Bloom filter initialized with all existing UINs.");
+		} finally {
+			em.close();
+		}
+	}
+
+	public long getExistingUinCountFromDB() {
+		EntityManager em = entityManagerFactory.createEntityManager();
+		try {
+			return em.createQuery("SELECT COUNT(u) FROM UinEntity u", Long.class).getSingleResult();
+		} finally {
+			em.close();
+		}
+	}
+
 	@Override
-    public void generateId(long noOfUINToGenerate) {
+	public void generateId(long noOfUINToGenerate) {
 		LOGGER.info("✅ Started {} UINs (single-threaded, batched)", noOfUINToGenerate);
-		
-		long startTime = System.nanoTime();  // Start timer
-		
-        int generatedIdLength = uinLength - 1;
-        long upperBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.NINE, generatedIdLength));
-        long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
+		initializeBloomFilter();
 
-        int batchSize = 5000; // Optimized batch size
-        int adjustedBatchSize = (int) Math.min(batchSize, noOfUINToGenerate);
-        Set<String> generatedSet = new HashSet<>((int) noOfUINToGenerate);
-        EntityManager em = entityManagerFactory.createEntityManager();
-        EntityTransaction tx = em.getTransaction();
+		long startTime = System.nanoTime(); // Start timer
 
-        try {
-            long count = 0;
-            List<UinEntity> batch = new ArrayList<>(batchSize);
+		int generatedIdLength = uinLength - 1;
+		long upperBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.NINE, generatedIdLength));
+		long lowerBound = Long.parseLong(StringUtils.repeat(UinGeneratorConstant.ZERO, generatedIdLength));
 
-            while (count < noOfUINToGenerate) {
-                String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
-                if (generatedSet.add(uin) && uinFilterUtils.isValidId(uin)) {
-                    UinEntity entity = new UinEntity(uin, uinDefaultStatus);
-                    metaDataUtil.setCreateMetaData(entity);
-                    batch.add(entity);
-                    count++;
+		int batchSize = 5000; // Optimized batch size
+		int adjustedBatchSize = (int) Math.min(batchSize, noOfUINToGenerate);
+		Set<String> generatedSet = new HashSet<>((int) noOfUINToGenerate);
+		EntityManager em = entityManagerFactory.createEntityManager();
+		EntityTransaction tx = em.getTransaction();
 
-                    if (batch.size() >= adjustedBatchSize || count == noOfUINToGenerate) {
-                        tx.begin();
-                        try {
-                            for (UinEntity batchEntity : batch) {
-                                em.persist(batchEntity);
-                            }
-                            em.flush();
-                            em.clear();
-                            tx.commit();
-                        } catch (PersistenceException e) {
-                            tx.rollback();
-                            LOGGER.warn("Duplicate UINs detected in batch, retrying individually...");
-                            for (UinEntity entityToRetry : batch) {
-                                EntityTransaction retryTx = em.getTransaction();
-                                try {
-                                    retryTx.begin();
-                                    if (generatedSet.contains(entityToRetry.getUin())) {
-                                        em.persist(entityToRetry);
-                                        em.flush();
-                                        retryTx.commit();
-                                    } else {
-                                        retryTx.rollback();
-                                        count--;
-                                    }
-                                } catch (Exception retryEx) {
-                                    retryTx.rollback();
-                                    LOGGER.warn("Failed UIN: {}, will retry later", entityToRetry.getUin());
-                                    count--;
-                                    generatedSet.remove(entityToRetry.getUin());
-                                }
-                            }
-                        }
-                        batch.clear();
-                    }
-                }
-            }
-            long endTime = System.nanoTime();  // End timer
-            long durationMillis = (endTime - startTime) / 1_000_000;
-            LOGGER.info("✅ Generated {} UINs (single-threaded, batched)", noOfUINToGenerate);
-            LOGGER.info("⏱️ Total time taken for UINs (single-threaded, batched): {} ms (~{} seconds)", durationMillis, durationMillis / 1000);
-        } catch (Exception e) {
-            if (tx.isActive()) {
-                tx.rollback();
-            }
-            LOGGER.error("❌ UIN generation failed", e);
-        } finally {
-            em.close();
-        }
-    }
+		try {
+			long count = 0;
+			List<UinEntity> batch = new ArrayList<>(batchSize);
+
+			while (count < noOfUINToGenerate) {
+				String uin = generateSingleId(generatedIdLength, lowerBound, upperBound);
+				if (!uinBloomFilter.mightContain(uin)) {
+					// UIN not seen before according to the filter, add to it
+					uinBloomFilter.put(uin);
+
+					if (generatedSet.add(uin) && uinFilterUtils.isValidId(uin)) {
+						UinEntity entity = new UinEntity(uin, uinDefaultStatus);
+						metaDataUtil.setCreateMetaData(entity);
+						batch.add(entity);
+						count++;
+
+						if (batch.size() >= adjustedBatchSize || count == noOfUINToGenerate) {
+							tx.begin();
+							try {
+								for (UinEntity batchEntity : batch) {
+									em.persist(batchEntity);
+								}
+								em.flush();
+								em.clear();
+								tx.commit();
+							} catch (PersistenceException e) {
+								tx.rollback();
+								LOGGER.warn("Duplicate UINs detected in batch, retrying individually...");
+								for (UinEntity entityToRetry : batch) {
+									EntityTransaction retryTx = em.getTransaction();
+									try {
+										retryTx.begin();
+										if (generatedSet.contains(entityToRetry.getUin())) {
+											em.persist(entityToRetry);
+											em.flush();
+											retryTx.commit();
+										} else {
+											retryTx.rollback();
+											count--;
+										}
+									} catch (Exception retryEx) {
+										retryTx.rollback();
+										LOGGER.warn("Failed UIN: {}, will retry later", entityToRetry.getUin());
+										count--;
+										generatedSet.remove(entityToRetry.getUin());
+									}
+								}
+							}
+							batch.clear();
+						}
+					}
+				}
+			}
+			long endTime = System.nanoTime(); // End timer
+			long durationMillis = (endTime - startTime) / 1_000_000;
+			LOGGER.info("✅ Generated {} UINs (single-threaded, batched)", noOfUINToGenerate);
+			LOGGER.info("⏱️ Total time taken for UINs (single-threaded, batched): {} ms (~{} seconds)", durationMillis,
+					durationMillis / 1000);
+		} catch (Exception e) {
+			if (tx.isActive()) {
+				tx.rollback();
+			}
+			LOGGER.error("❌ UIN generation failed", e);
+		} finally {
+			em.close();
+		}
+	}
 
 	/**
 	 * Generates a id and then generate checksum
@@ -244,13 +304,15 @@ public class UinGeneratorImpl implements UinGenerator {
 	 * @return the uin with checksum
 	 */
 	private String generateSingleId(int generatedIdLength, long lowerBound, long upperBound) {
-		/*
-		 * byte[] randomSeedBytes = new byte[generatedIdLength]; if (random == null) {
-		 * initializeSecureRandom(); } random.nextBytes(randomSeedBytes);
-		 */
+		byte[] randomSeedBytes = new byte[generatedIdLength];
+		if (random == null) {
+			initializeSecureRandom();
+		}
+		random.nextBytes(randomSeedBytes);
+
 		long range = upperBound - lowerBound + 1;
-		long randomNumber = ThreadLocalRandom.current().nextLong(range) + lowerBound;
-		//long randomNumber = (Math.abs(random.nextLong()) % range) + lowerBound;
+		// long randomNumber = ThreadLocalRandom.current().nextLong(range) + lowerBound;
+		long randomNumber = (Math.abs(random.nextLong()) % range) + lowerBound;
 		String generatedID = String.format("%0" + generatedIdLength + "d", randomNumber);
 
 		// String generatedID = new

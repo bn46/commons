@@ -115,7 +115,7 @@ public class VidPopulatorVerticle extends AbstractVerticle {
 	                long endTime = System.nanoTime();
 	                long durationMillis = (endTime - startTime) / 1_000_000;
 	                LOGGER.info("✅ Total VIDs persisted: {}", count);
-	                LOGGER.info("⏱️ Time taken: {} ms (~{} seconds)", durationMillis, durationMillis / 1000);
+	                LOGGER.info("⏱️ Time taken for : {} ms (~{} seconds)", durationMillis, durationMillis / 1000);
 	                promise.complete(count);
 	            } catch (Exception e) {
 	                LOGGER.error("❌ VID pool generation error", e);
