@@ -91,6 +91,28 @@ public class UinGeneratorImpl implements UinGenerator {
 
 	private Set<String> generatedSet = new HashSet<>();
 
+	/*
+	 * ✅ Can the Bloom Filter Hold 1 Billion Records?
+	 *
+	 * Yes, but sufficient memory must be allocated.
+	 *
+	 * 📌 Memory Requirement Estimation:
+	 * Using the formula:
+	 *     m = -(n * ln(f)) / (ln(2)^2)
+	 *
+	 * Where:
+	 *     n = 1,000,000,000   // number of elements
+	 *     f = 0.001           // desired false positive rate (0.1%)
+	 *
+	 * Calculation:
+	 *     m ≈ 1,000,000,000 * 6.91 / 0.48 ≈ 14.4 billion bits
+	 *       ≈ 1.8 billion bytes
+	 *       ≈ 1.68 GB of RAM
+	 *
+	 * 🧠 Important:
+	 * - Increase JVM heap size using: -Xmx4g or higher
+	 * - Consider serializing the Bloom filter to disk to avoid rebuilding
+	 */
 	private BloomFilter<CharSequence> uinBloomFilter;
 
 	@SuppressWarnings("deprecation")
