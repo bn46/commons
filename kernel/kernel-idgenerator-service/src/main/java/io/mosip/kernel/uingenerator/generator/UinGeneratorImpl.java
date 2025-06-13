@@ -258,31 +258,9 @@ public class UinGeneratorImpl implements UinGenerator {
 	                count++;
 
 	                if (batch.size() >= adjustedBatchSize || count == noOfUINToGenerate) {
-	                    tx.begin();
-	                    try {
-	                        for (UinEntity batchEntity : batch) {
-	                            em.persist(batchEntity);
-	                        }
-	                        em.flush();
-	                        em.clear();
-	                        tx.commit();
-	                    } catch (PersistenceException e) {
-	                        tx.rollback();
-	                        LOGGER.warn("Duplicate UINs detected in batch, retrying individually...");
-	                        for (UinEntity entityToRetry : batch) {
-	                            EntityTransaction retryTx = em.getTransaction();
-	                            try {
-	                                retryTx.begin();
-	                                em.persist(entityToRetry);
-	                                em.flush();
-	                                retryTx.commit();
-	                            } catch (Exception retryEx) {
-	                                retryTx.rollback();
-	                                LOGGER.warn("Failed UIN: {}, will retry later", entityToRetry.getUin());
-	                                count--; // adjust count to retry
-	                            }
-	                        }
-	                    }
+	                	count -= batch.size(); // Reset counter before retry
+	                	int inserted = insertBatch(em, batch);
+	                	count += inserted;
 	                    batch.clear();
 	                }
 	            }
@@ -346,4 +324,58 @@ public class UinGeneratorImpl implements UinGenerator {
 	private String appendChecksum(int generatedIdLength, String generatedID, String verhoeffDigit) {
 		return generatedID + verhoeffDigit;
 	}
+	
+	private int insertBatch(EntityManager em, List<UinEntity> batch) {
+		if (batch == null || batch.isEmpty()) return 0;
+
+		List<String> uinStrings = batch.stream().map(UinEntity::getUin).toList();
+		List<String> existingUins = em.createQuery("SELECT u.uin FROM UinEntity u WHERE u.uin IN :uins", String.class)
+				.setParameter("uins", uinStrings)
+				.getResultList();
+		Set<String> existingSet = new HashSet<>(existingUins);
+
+		List<UinEntity> filteredBatch = batch.stream()
+				.filter(u -> !existingSet.contains(u.getUin()))
+				.toList();
+
+		if (filteredBatch.isEmpty()) return 0;
+
+		EntityTransaction tx = em.getTransaction();
+		int insertedCount = 0;
+
+		try {
+			tx.begin();
+			for (UinEntity entity : filteredBatch) {
+				em.persist(entity);
+				insertedCount++;
+			}
+			em.flush();
+			em.clear();
+			tx.commit();
+		} catch (PersistenceException e) {
+			tx.rollback();
+			LOGGER.warn("⚠️ Batch insert failed. Retrying individually...");
+
+			for (UinEntity entity : filteredBatch) {
+				EntityTransaction retryTx = em.getTransaction();
+				try {
+					boolean exists = em.createQuery("SELECT COUNT(u) FROM UinEntity u WHERE u.uin = :uin", Long.class)
+							.setParameter("uin", entity.getUin())
+							.getSingleResult() > 0;
+					if (!exists) {
+						retryTx.begin();
+						em.persist(entity);
+						em.flush();
+						retryTx.commit();
+						insertedCount++;
+					}
+				} catch (Exception retryEx) {
+					retryTx.rollback();
+					LOGGER.warn("❌ Retry failed for UIN: {}", entity.getUin());
+				}
+			}
+		}
+		return insertedCount;
+	}
+
 }
